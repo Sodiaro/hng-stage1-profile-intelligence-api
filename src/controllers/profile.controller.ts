@@ -2,22 +2,212 @@ import { Request, Response } from 'express';
 import { v7 as uuidv7 } from 'uuid';
 import { EnrichmentService } from '../services/enrichment.service.js';
 import { getPrisma } from '../lib/prisma.js';
+import { findCountryInText } from '../utils/countries.js';
+
+// helpers
+
+function formatProfile(profile: any) {
+  return {
+    id: profile.id,
+    name: profile.name,
+    gender: profile.gender,
+    gender_probability: profile.gender_probability,
+    age: profile.age,
+    age_group: profile.age_group,
+    country_id: profile.country_id,
+    country_name: profile.country_name,
+    country_probability: profile.country_probability,
+    created_at: new Date(profile.created_at).toISOString().replace(/\.\d{3}Z$/, 'Z'),
+  };
+}
+
+function buildWhereClause(query: Record<string, any>): { where: any; error?: { status: number; message: string } } {
+  const {
+    gender, age_group, country_id,
+    min_age, max_age,
+    min_gender_probability, min_country_probability,
+  } = query;
+
+  const where: any = {};
+
+  if (gender !== undefined) {
+    where.gender = { equals: String(gender).toLowerCase(), mode: 'insensitive' };
+  }
+  if (age_group !== undefined) {
+    where.age_group = { equals: String(age_group).toLowerCase(), mode: 'insensitive' };
+  }
+  if (country_id !== undefined) {
+    where.country_id = { equals: String(country_id).toUpperCase(), mode: 'insensitive' };
+  }
+
+  if (min_age !== undefined) {
+    const n = Number(min_age);
+    if (!Number.isInteger(n) || isNaN(n) || n < 0) {
+      return { where: null, error: { status: 422, message: 'Invalid query parameters' } };
+    }
+    where.age = { ...where.age, gte: n };
+  }
+  if (max_age !== undefined) {
+    const n = Number(max_age);
+    if (!Number.isInteger(n) || isNaN(n) || n < 0) {
+      return { where: null, error: { status: 422, message: 'Invalid query parameters' } };
+    }
+    where.age = { ...where.age, lte: n };
+  }
+  if (min_gender_probability !== undefined) {
+    const n = Number(min_gender_probability);
+    if (isNaN(n) || n < 0 || n > 1) {
+      return { where: null, error: { status: 422, message: 'Invalid query parameters' } };
+    }
+    where.gender_probability = { gte: n };
+  }
+  if (min_country_probability !== undefined) {
+    const n = Number(min_country_probability);
+    if (isNaN(n) || n < 0 || n > 1) {
+      return { where: null, error: { status: 422, message: 'Invalid query parameters' } };
+    }
+    where.country_probability = { gte: n };
+  }
+
+  return { where };
+}
+
+function buildOrderBy(sort_by: unknown, order: unknown): { orderBy: any } | { error: { status: number; message: string } } {
+  const validSortFields = ['age', 'created_at', 'gender_probability'] as const;
+  const validOrders = ['asc', 'desc'] as const;
+
+  if (sort_by !== undefined && !validSortFields.includes(sort_by as any)) {
+    return { error: { status: 422, message: 'Invalid query parameters' } };
+  }
+  if (order !== undefined && !validOrders.includes((order as string).toLowerCase() as any)) {
+    return { error: { status: 422, message: 'Invalid query parameters' } };
+  }
+
+  const field = (sort_by as string) || 'created_at';
+  const dir = ((order as string) || 'asc').toLowerCase();
+  return { orderBy: { [field]: dir } };
+}
+
+function parsePagination(page: unknown, limit: unknown): { page: number; limit: number } | { error: { status: number; message: string } } {
+  let p = 1;
+  let l = 10;
+
+  if (page !== undefined) {
+    const n = Number(page);
+    if (!Number.isInteger(n) || isNaN(n) || n < 1) {
+      return { error: { status: 422, message: 'Invalid query parameters' } };
+    }
+    p = n;
+  }
+  if (limit !== undefined) {
+    const n = Number(limit);
+    if (!Number.isInteger(n) || isNaN(n) || n < 1) {
+      return { error: { status: 422, message: 'Invalid query parameters' } };
+    }
+    l = Math.min(n, 50);
+  }
+
+  return { page: p, limit: l };
+}
+
+// Natural Language Query Parser
+
+interface NLFilters {
+  gender?: string;
+  age_group?: string;
+  min_age?: number;
+  max_age?: number;
+  country_id?: string;
+}
+
+function parseNaturalLanguage(q: string): NLFilters | null {
+  const text = q.toLowerCase().trim();
+  if (!text) return null;
+
+  const filters: NLFilters = {};
+  let recognized = false;
+
+  // Gender
+  const hasMale = /\b(male|males|man|men|boy|boys)\b/.test(text);
+  const hasFemale = /\b(female|females|woman|women|girl|girls)\b/.test(text);
+
+  if (hasMale && !hasFemale) {
+    filters.gender = 'male';
+    recognized = true;
+  } else if (hasFemale && !hasMale) {
+    filters.gender = 'female';
+    recognized = true;
+  } else if (hasMale && hasFemale) {
+    // both mentioned → no gender filter, but still recognized
+    recognized = true;
+  }
+
+  // "young" → special age range 16-24, NOT an age_group
+  if (/\byoung\b/.test(text)) {
+    filters.min_age = 16;
+    filters.max_age = 24;
+    recognized = true;
+  } else {
+    // Age group keywords (only when "young" is absent)
+    if (/\b(child|children|kid|kids)\b/.test(text)) {
+      filters.age_group = 'child';
+      recognized = true;
+    } else if (/\b(teenager|teenagers|teen|teens|adolescent|adolescents)\b/.test(text)) {
+      filters.age_group = 'teenager';
+      recognized = true;
+    } else if (/\b(adult|adults)\b/.test(text)) {
+      filters.age_group = 'adult';
+      recognized = true;
+    } else if (/\b(senior|seniors|elderly)\b/.test(text)) {
+      filters.age_group = 'senior';
+      recognized = true;
+    }
+  }
+
+  // "above X" / "over X" / "older than X" → min_age (additive, can combine with age_group)
+  const aboveMatch = text.match(/\b(?:above|over|older than|more than)\s+(\d+)\b/);
+  if (aboveMatch) {
+    filters.min_age = parseInt(aboveMatch[1], 10);
+    recognized = true;
+  }
+
+  // "below X" / "under X" / "younger than X" → max_age
+  const belowMatch = text.match(/\b(?:below|under|younger than|less than)\s+(\d+)\b/);
+  if (belowMatch) {
+    filters.max_age = parseInt(belowMatch[1], 10);
+    recognized = true;
+  }
+
+  // "between X and Y" → overrides individual above/below
+  const betweenMatch = text.match(/\bbetween\s+(\d+)\s+and\s+(\d+)\b/);
+  if (betweenMatch) {
+    filters.min_age = parseInt(betweenMatch[1], 10);
+    filters.max_age = parseInt(betweenMatch[2], 10);
+    recognized = true;
+  }
+
+  // Country detection
+  const countryId = findCountryInText(text);
+  if (countryId) {
+    filters.country_id = countryId;
+    recognized = true;
+  }
+
+  return recognized ? filters : null;
+}
+
+// Controllers
 
 export class ProfileController {
   static async createProfile(req: Request, res: Response) {
     const prisma = getPrisma();
     try {
-      // Check if body exists or name is missing
       if (!req.body || req.body.name === undefined || req.body.name === null) {
         return res.status(400).json({ status: 'error', message: 'Missing or empty name' });
       }
-
-      // Check type — must be string
       if (typeof req.body.name !== 'string') {
         return res.status(422).json({ status: 'error', message: 'Invalid type for name' });
       }
-
-      // Check empty string
       const trimmed = req.body.name.trim();
       if (trimmed.length === 0) {
         return res.status(400).json({ status: 'error', message: 'Missing or empty name' });
@@ -25,11 +215,7 @@ export class ProfileController {
 
       const normalizedName = trimmed.toLowerCase();
 
-      // Idempotency: check if profile with this name already exists
-      const existingProfile = await prisma.profile.findUnique({
-        where: { name: normalizedName },
-      });
-
+      const existingProfile = await prisma.profile.findUnique({ where: { name: normalizedName } });
       if (existingProfile) {
         return res.status(200).json({
           status: 'success',
@@ -38,29 +224,15 @@ export class ProfileController {
         });
       }
 
-      // Enrich the name via external APIs
       const enrichedData = await EnrichmentService.enrichName(normalizedName);
-
-      // Persist
       const newProfile = await prisma.profile.create({
-        data: {
-          id: uuidv7(),
-          name: normalizedName,
-          ...enrichedData,
-          created_at: new Date(),
-        },
+        data: { id: uuidv7(), name: normalizedName, ...enrichedData, created_at: new Date() },
       });
 
-      return res.status(201).json({
-        status: 'success',
-        data: formatProfile(newProfile),
-      });
+      return res.status(201).json({ status: 'success', data: formatProfile(newProfile) });
     } catch (error: any) {
       if (error.status === 502) {
-        return res.status(502).json({
-          status: 'error',
-          message: `${error.externalApi} returned an invalid response`,
-        });
+        return res.status(502).json({ status: 'error', message: `${error.externalApi} returned an invalid response` });
       }
       console.error('Create profile error:', error);
       return res.status(500).json({ status: 'error', message: error.message || 'Internal server error' });
@@ -70,20 +242,12 @@ export class ProfileController {
   static async getProfileById(req: Request, res: Response) {
     const prisma = getPrisma();
     try {
-      const { id } = req.params;
-
-      const profile = await prisma.profile.findUnique({
-        where: { id },
-      });
-
+      const id = String(req.params.id);
+      const profile = await prisma.profile.findUnique({ where: { id } });
       if (!profile) {
         return res.status(404).json({ status: 'error', message: 'Profile not found' });
       }
-
-      return res.status(200).json({
-        status: 'success',
-        data: formatProfile(profile),
-      });
+      return res.status(200).json({ status: 'success', data: formatProfile(profile) });
     } catch (error: any) {
       console.error('Get profile error:', error);
       return res.status(500).json({ status: 'error', message: 'Internal server error' });
@@ -93,29 +257,43 @@ export class ProfileController {
   static async listProfiles(req: Request, res: Response) {
     const prisma = getPrisma();
     try {
-      const { gender, country_id, age_group } = req.query;
+      const { sort_by, order, page: pageQ, limit: limitQ, ...filterParams } = req.query;
 
-      const where: any = {};
-      if (gender) where.gender = { equals: (gender as string).toLowerCase(), mode: 'insensitive' };
-      if (country_id) where.country_id = { equals: (country_id as string).toUpperCase(), mode: 'insensitive' };
-      if (age_group) where.age_group = { equals: (age_group as string).toLowerCase(), mode: 'insensitive' };
+      // Build WHERE
+      const { where, error: whereError } = buildWhereClause(filterParams);
+      if (whereError) {
+        return res.status(whereError.status).json({ status: 'error', message: whereError.message });
+      }
 
-      const profiles = await prisma.profile.findMany({
-        where,
-        select: {
-          id: true,
-          name: true,
-          gender: true,
-          age: true,
-          age_group: true,
-          country_id: true,
-        },
-      });
+      // Build ORDER BY
+      const orderResult = buildOrderBy(sort_by, order);
+      if ('error' in orderResult) {
+        return res.status(orderResult.error.status).json({ status: 'error', message: orderResult.error.message });
+      }
+
+      // Pagination
+      const pagResult = parsePagination(pageQ, limitQ);
+      if ('error' in pagResult) {
+        return res.status(pagResult.error.status).json({ status: 'error', message: pagResult.error.message });
+      }
+      const { page, limit } = pagResult;
+
+      const [total, profiles] = await Promise.all([
+        prisma.profile.count({ where }),
+        prisma.profile.findMany({
+          where,
+          orderBy: orderResult.orderBy,
+          skip: (page - 1) * limit,
+          take: limit,
+        }),
+      ]);
 
       return res.status(200).json({
         status: 'success',
-        count: profiles.length,
-        data: profiles,
+        page,
+        limit,
+        total,
+        data: profiles.map(formatProfile),
       });
     } catch (error: any) {
       console.error('List profiles error:', error);
@@ -123,43 +301,72 @@ export class ProfileController {
     }
   }
 
+  static async searchProfiles(req: Request, res: Response) {
+    const prisma = getPrisma();
+    try {
+      const { q, page: pageQ, limit: limitQ } = req.query;
+
+      if (!q || typeof q !== 'string' || q.trim() === '') {
+        return res.status(400).json({ status: 'error', message: 'Invalid query parameters' });
+      }
+
+      const nlFilters = parseNaturalLanguage(q.trim());
+      if (!nlFilters) {
+        return res.status(422).json({ status: 'error', message: 'Unable to interpret query' });
+      }
+
+      const pagResult = parsePagination(pageQ, limitQ);
+      if ('error' in pagResult) {
+        return res.status(pagResult.error.status).json({ status: 'error', message: pagResult.error.message });
+      }
+      const { page, limit } = pagResult;
+
+      const where: any = {};
+      if (nlFilters.gender) where.gender = nlFilters.gender;
+      if (nlFilters.age_group) where.age_group = nlFilters.age_group;
+      if (nlFilters.country_id) where.country_id = nlFilters.country_id;
+      if (nlFilters.min_age !== undefined || nlFilters.max_age !== undefined) {
+        where.age = {};
+        if (nlFilters.min_age !== undefined) where.age.gte = nlFilters.min_age;
+        if (nlFilters.max_age !== undefined) where.age.lte = nlFilters.max_age;
+      }
+
+      const [total, profiles] = await Promise.all([
+        prisma.profile.count({ where }),
+        prisma.profile.findMany({
+          where,
+          orderBy: { created_at: 'asc' },
+          skip: (page - 1) * limit,
+          take: limit,
+        }),
+      ]);
+
+      return res.status(200).json({
+        status: 'success',
+        page,
+        limit,
+        total,
+        data: profiles.map(formatProfile),
+      });
+    } catch (error: any) {
+      console.error('Search profiles error:', error);
+      return res.status(500).json({ status: 'error', message: 'Internal server error' });
+    }
+  }
+
   static async deleteProfile(req: Request, res: Response) {
     const prisma = getPrisma();
     try {
-      const { id } = req.params;
-
+      const id = String(req.params.id);
       const profile = await prisma.profile.findUnique({ where: { id } });
       if (!profile) {
         return res.status(404).json({ status: 'error', message: 'Profile not found' });
       }
-
-      await prisma.profile.delete({
-        where: { id },
-      });
-
+      await prisma.profile.delete({ where: { id } });
       return res.status(204).send();
     } catch (error: any) {
       console.error('Delete profile error:', error);
       return res.status(500).json({ status: 'error', message: 'Internal server error' });
     }
   }
-}
-
-/**
- * Format profile data for API response.
- * Ensures created_at is in UTC ISO 8601 format.
- */
-function formatProfile(profile: any) {
-  return {
-    id: profile.id,
-    name: profile.name,
-    gender: profile.gender,
-    gender_probability: profile.gender_probability,
-    sample_size: profile.sample_size,
-    age: profile.age,
-    age_group: profile.age_group,
-    country_id: profile.country_id,
-    country_probability: profile.country_probability,
-    created_at: new Date(profile.created_at).toISOString().replace(/\.\d{3}Z$/, 'Z'),
-  };
 }
