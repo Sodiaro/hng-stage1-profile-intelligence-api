@@ -1,41 +1,66 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import morgan from 'morgan';
+import cookieParser from 'cookie-parser';
+import rateLimit from 'express-rate-limit';
 import profileRoutes from './routes/profile.routes.js';
+import authRoutes from './routes/auth.routes.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// CORS - must be first
+// CORS
 app.use(cors({
-  origin: '*',
+  origin: [process.env.WEB_ORIGIN || 'http://localhost:5173', 'http://localhost:3000'],
   methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Version', 'X-CSRF-Token'],
+  credentials: true,
 }));
+// Ensure Access-Control-Allow-Origin: * for unauthenticated contexts
+app.use((_req, res, next) => {
+  if (!res.getHeader('Access-Control-Allow-Origin')) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
+  next();
+});
 
-// Parse JSON bodies
+// Middleware
 app.use(express.json());
+app.use(cookieParser());
+
+// Request logging: method endpoint status response-time
+app.use(morgan(':method :url :status :response-time ms'));
+
+// Rate limiting
+const authLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { status: 'error', message: 'Too many requests' },
+});
+
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  keyGenerator: (req) => (req as any).user?.id || req.ip || 'anon',
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { status: 'error', message: 'Too many requests' },
+});
 
 // Routes
-app.use('/api/profiles', profileRoutes);
+app.use('/auth', authLimiter, authRoutes);
+app.use('/api/profiles', apiLimiter, profileRoutes);
 
-// Health check
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok' });
-});
+// Health + root
+app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+app.get('/', (_req, res) => res.json({ status: 'ok', message: 'Insighta Labs+ API' }));
 
-// Root endpoint
-app.get('/', (_req, res) => {
-  res.json({ status: 'ok', message: 'Profile Intelligence API' });
-});
+// 404
+app.use((_req, res) => res.status(404).json({ status: 'error', message: 'Endpoint not found' }));
 
-// 404 handler
-app.use((_req, res) => {
-  res.status(404).json({ status: 'error', message: 'Endpoint not found' });
-});
-
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
 export default app;

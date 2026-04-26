@@ -6,6 +6,33 @@ datasource db {
   provider = "postgresql"
 }
 
+model User {
+  id            String         @id
+  github_id     String         @unique
+  username      String
+  email         String?
+  avatar_url    String?
+  role          String         @default("analyst")
+  is_active     Boolean        @default(true)
+  last_login_at DateTime?      @db.Timestamptz
+  created_at    DateTime       @default(now()) @db.Timestamptz
+  refresh_tokens RefreshToken[]
+
+  @@index([github_id])
+}
+
+model RefreshToken {
+  id         String   @id
+  user_id    String
+  token_hash String   @unique
+  expires_at DateTime @db.Timestamptz
+  created_at DateTime @default(now()) @db.Timestamptz
+  user       User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@index([expires_at])
+}
+
 model Profile {
   id                  String   @id
   name                String   @unique
