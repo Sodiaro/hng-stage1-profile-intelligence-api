@@ -17,13 +17,6 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Version', 'X-CSRF-Token'],
   credentials: true,
 }));
-// Ensure Access-Control-Allow-Origin: * for unauthenticated contexts
-app.use((_req, res, next) => {
-  if (!res.getHeader('Access-Control-Allow-Origin')) {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-  }
-  next();
-});
 
 // Middleware
 app.use(express.json());
@@ -44,7 +37,7 @@ const authLimiter = rateLimit({
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 60,
-  keyGenerator: (req) => (req as any).user?.id || req.ip || 'anon',
+  keyGenerator: (req) => (req as any).user?.id ?? 'anonymous',
   standardHeaders: true,
   legacyHeaders: false,
   message: { status: 'error', message: 'Too many requests' },

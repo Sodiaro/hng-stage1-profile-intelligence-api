@@ -5,6 +5,12 @@ import axios from 'axios';
 import { v7 as uuidv7 } from 'uuid';
 import { getPrisma } from '../lib/prisma.js';
 
+// Cookie options
+function cookieOpts(maxAge: number): object {
+  const isProduction = (process.env.WEB_ORIGIN || '').startsWith('https://');
+  return { httpOnly: true, sameSite: isProduction ? 'none' : 'lax', secure: isProduction, maxAge };
+}
+
 // In-memory PKCE + state store (TTL: 10 minutes)
 interface PkceEntry {
   code_challenge: string;
@@ -141,7 +147,7 @@ export class AuthController {
     return res.redirect(buildGithubAuthUrl(state));
   }
 
-  // GET /auth/github/callback — web browser callback
+  // GET /auth/github/callback
   static async webCallback(req: Request, res: Response) {
     const { code, state } = req.query as Record<string, string>;
     const webOrigin = process.env.WEB_ORIGIN || 'http://localhost:5173';
@@ -164,9 +170,9 @@ export class AuthController {
       const refreshToken = await issueRefreshToken(user.id);
 
       res
-        .cookie('access_token', accessToken, { httpOnly: true, sameSite: 'lax', maxAge: 3 * 60 * 1000 })
-        .cookie('refresh_token', refreshToken, { httpOnly: true, sameSite: 'lax', maxAge: Number(process.env.REFRESH_TOKEN_EXPIRY_MS || 300000) })
-        .redirect(`${webOrigin}/dashboard`);
+        .cookie('access_token', accessToken, cookieOpts(3 * 60 * 1000))
+        .cookie('refresh_token', refreshToken, cookieOpts(Number(process.env.REFRESH_TOKEN_EXPIRY_MS || 300000)))
+        .redirect(`${webOrigin}/`);
     } catch (err) {
       console.error('Web OAuth callback error:', err);
       res.redirect(`${webOrigin}/login?error=auth_failed`);
@@ -252,8 +258,8 @@ export class AuthController {
       // Web: set cookies; CLI: return JSON
       if (req.cookies?.refresh_token) {
         return res
-          .cookie('access_token', newAccessToken, { httpOnly: true, sameSite: 'lax', maxAge: 3 * 60 * 1000 })
-          .cookie('refresh_token', newRefreshToken, { httpOnly: true, sameSite: 'lax', maxAge: Number(process.env.REFRESH_TOKEN_EXPIRY_MS || 300000) })
+          .cookie('access_token', newAccessToken, cookieOpts(3 * 60 * 1000))
+          .cookie('refresh_token', newRefreshToken, cookieOpts(Number(process.env.REFRESH_TOKEN_EXPIRY_MS || 300000)))
           .json({ status: 'success', access_token: newAccessToken, refresh_token: newRefreshToken });
       }
 
@@ -274,9 +280,11 @@ export class AuthController {
       await prisma.refreshToken.deleteMany({ where: { token_hash: hash } }).catch(() => {});
     }
 
+    const isProduction = (process.env.WEB_ORIGIN || '').startsWith('https://');
+    const clearOpts = isProduction ? { sameSite: 'none' as const, secure: true } : {};
     res
-      .clearCookie('access_token')
-      .clearCookie('refresh_token')
+      .clearCookie('access_token', clearOpts)
+      .clearCookie('refresh_token', clearOpts)
       .json({ status: 'success', message: 'Logged out' });
   }
 
