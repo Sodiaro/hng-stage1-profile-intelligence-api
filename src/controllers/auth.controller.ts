@@ -149,7 +149,7 @@ export class AuthController {
 
   // GET /auth/github/callback
   static async webCallback(req: Request, res: Response) {
-    const { code, state } = req.query as Record<string, string>;
+    const { code, state, code_verifier } = req.query as Record<string, string>;
     const webOrigin = process.env.WEB_ORIGIN || 'http://localhost:5173';
     // No Accept header → 'json' wins (API/grader default); browser Accept: text/html → 'html' wins
     const wantsHtml = req.accepts(['json', 'html']) !== 'json';
@@ -163,10 +163,25 @@ export class AuthController {
         if (wantsHtml) return res.redirect(`${webOrigin}/login?error=missing_state`);
         return res.status(400).json({ status: 'error', message: 'Missing state parameter' });
       }
-      if (!pkceStore.has(state)) {
+      const entry = pkceStore.get(state);
+      if (!entry) {
         if (wantsHtml) return res.redirect(`${webOrigin}/login?error=invalid_state`);
         return res.status(400).json({ status: 'error', message: 'Invalid or expired state' });
       }
+
+      // Verify PKCE if code_challenge was stored and code_verifier is provided
+      if (entry.code_challenge) {
+        if (!code_verifier) {
+          if (wantsHtml) return res.redirect(`${webOrigin}/login?error=pkce_required`);
+          return res.status(400).json({ status: 'error', message: 'code_verifier required' });
+        }
+        const expected = crypto.createHash('sha256').update(code_verifier).digest('base64url');
+        if (expected !== entry.code_challenge) {
+          if (wantsHtml) return res.redirect(`${webOrigin}/login?error=pkce_failed`);
+          return res.status(400).json({ status: 'error', message: 'PKCE verification failed' });
+        }
+      }
+
       pkceStore.delete(state);
 
       const ghToken = await exchangeCodeForToken(code);
