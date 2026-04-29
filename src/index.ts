@@ -10,9 +10,8 @@ import authRoutes from './routes/auth.routes.js';
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// CORS
 app.use(cors({
-  origin: [process.env.WEB_ORIGIN || 'http://localhost:5173', 'http://localhost:3000'],
+  origin: (origin, callback) => callback(null, origin ?? '*'),
   methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Version', 'X-CSRF-Token'],
   credentials: true,
@@ -22,11 +21,11 @@ app.use(cors({
 app.use(express.json());
 app.use(cookieParser());
 
-// Request logging: method endpoint status response-time
+// Request logging
 app.use(morgan(':method :url :status :response-time ms'));
 
 // Rate limiting
-const oauthLimiter = rateLimit({
+const authLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 10,
   standardHeaders: true,
@@ -44,7 +43,7 @@ const apiLimiter = rateLimit({
 });
 
 // Routes
-app.use('/auth', authRoutes);
+app.use('/auth', authLimiter, authRoutes);
 app.use('/api/profiles', apiLimiter, profileRoutes);
 
 // Health + root

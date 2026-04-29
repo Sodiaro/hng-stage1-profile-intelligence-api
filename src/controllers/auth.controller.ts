@@ -151,10 +151,28 @@ export class AuthController {
   static async webCallback(req: Request, res: Response) {
     const { code, state } = req.query as Record<string, string>;
     const webOrigin = process.env.WEB_ORIGIN || 'http://localhost:5173';
+    const wantsJson = !!(req.accepts(['json', 'html']) === 'json');
+
+    const jsonError = (status: number, message: string) =>
+      res.status(status).json({ status: 'error', message });
+    const htmlRedirect = (url: string) =>
+      res.redirect(url);
 
     try {
-      if (!code || !state || !pkceStore.has(state)) {
-        return res.redirect(`${webOrigin}/login?error=invalid_state`);
+      if (!code) {
+        return wantsJson
+          ? jsonError(400, 'Missing code parameter')
+          : htmlRedirect(`${webOrigin}/login?error=missing_code`);
+      }
+      if (!state) {
+        return wantsJson
+          ? jsonError(400, 'Missing state parameter')
+          : htmlRedirect(`${webOrigin}/login?error=missing_state`);
+      }
+      if (!pkceStore.has(state)) {
+        return wantsJson
+          ? jsonError(400, 'Invalid or expired state')
+          : htmlRedirect(`${webOrigin}/login?error=invalid_state`);
       }
       pkceStore.delete(state);
 
@@ -163,7 +181,9 @@ export class AuthController {
       const user = await upsertUser(ghUser);
 
       if (!user.is_active) {
-        return res.redirect(`${webOrigin}/login?error=account_disabled`);
+        return wantsJson
+          ? jsonError(403, 'Account is disabled')
+          : htmlRedirect(`${webOrigin}/login?error=account_disabled`);
       }
 
       const accessToken = issueAccessToken(user.id, user.role);
@@ -171,11 +191,23 @@ export class AuthController {
 
       res
         .cookie('access_token', accessToken, cookieOpts(3 * 60 * 1000))
-        .cookie('refresh_token', refreshToken, cookieOpts(Number(process.env.REFRESH_TOKEN_EXPIRY_MS || 300000)))
-        .redirect(`${webOrigin}/`);
+        .cookie('refresh_token', refreshToken, cookieOpts(Number(process.env.REFRESH_TOKEN_EXPIRY_MS || 300000)));
+
+      if (wantsJson) {
+        return res.status(200).json({
+          status: 'success',
+          access_token: accessToken,
+          refresh_token: refreshToken,
+          user: { id: user.id, username: user.username, email: user.email, avatar_url: user.avatar_url, role: user.role },
+        });
+      }
+
+      return res.redirect(`${webOrigin}/`);
     } catch (err) {
       console.error('Web OAuth callback error:', err);
-      res.redirect(`${webOrigin}/login?error=auth_failed`);
+      return wantsJson
+        ? jsonError(502, 'GitHub authentication failed')
+        : htmlRedirect(`${webOrigin}/login?error=auth_failed`);
     }
   }
 
@@ -275,10 +307,12 @@ export class AuthController {
     const prisma = getPrisma();
     const plain: string = req.body?.refresh_token || req.cookies?.refresh_token;
 
-    if (plain) {
-      const hash = hashToken(plain);
-      await prisma.refreshToken.deleteMany({ where: { token_hash: hash } }).catch(() => {});
+    if (!plain) {
+      return res.status(400).json({ status: 'error', message: 'Refresh token required' });
     }
+
+    const hash = hashToken(plain);
+    await prisma.refreshToken.deleteMany({ where: { token_hash: hash } }).catch(() => {});
 
     const isProduction = (process.env.WEB_ORIGIN || '').startsWith('https://');
     const clearOpts = isProduction ? { sameSite: 'none' as const, secure: true } : {};
