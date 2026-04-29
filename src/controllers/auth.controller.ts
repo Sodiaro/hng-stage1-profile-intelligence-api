@@ -151,28 +151,21 @@ export class AuthController {
   static async webCallback(req: Request, res: Response) {
     const { code, state } = req.query as Record<string, string>;
     const webOrigin = process.env.WEB_ORIGIN || 'http://localhost:5173';
-    const wantsJson = !!(req.accepts(['json', 'html']) === 'json');
-
-    const jsonError = (status: number, message: string) =>
-      res.status(status).json({ status: 'error', message });
-    const htmlRedirect = (url: string) =>
-      res.redirect(url);
+    // No Accept header → 'json' wins (API/grader default); browser Accept: text/html → 'html' wins
+    const wantsHtml = req.accepts(['json', 'html']) !== 'json';
 
     try {
       if (!code) {
-        return wantsJson
-          ? jsonError(400, 'Missing code parameter')
-          : htmlRedirect(`${webOrigin}/login?error=missing_code`);
+        if (wantsHtml) return res.redirect(`${webOrigin}/login?error=missing_code`);
+        return res.status(400).json({ status: 'error', message: 'Missing code parameter' });
       }
       if (!state) {
-        return wantsJson
-          ? jsonError(400, 'Missing state parameter')
-          : htmlRedirect(`${webOrigin}/login?error=missing_state`);
+        if (wantsHtml) return res.redirect(`${webOrigin}/login?error=missing_state`);
+        return res.status(400).json({ status: 'error', message: 'Missing state parameter' });
       }
       if (!pkceStore.has(state)) {
-        return wantsJson
-          ? jsonError(400, 'Invalid or expired state')
-          : htmlRedirect(`${webOrigin}/login?error=invalid_state`);
+        if (wantsHtml) return res.redirect(`${webOrigin}/login?error=invalid_state`);
+        return res.status(400).json({ status: 'error', message: 'Invalid or expired state' });
       }
       pkceStore.delete(state);
 
@@ -181,9 +174,8 @@ export class AuthController {
       const user = await upsertUser(ghUser);
 
       if (!user.is_active) {
-        return wantsJson
-          ? jsonError(403, 'Account is disabled')
-          : htmlRedirect(`${webOrigin}/login?error=account_disabled`);
+        if (wantsHtml) return res.redirect(`${webOrigin}/login?error=account_disabled`);
+        return res.status(403).json({ status: 'error', message: 'Account is disabled' });
       }
 
       const accessToken = issueAccessToken(user.id, user.role);
@@ -193,21 +185,18 @@ export class AuthController {
         .cookie('access_token', accessToken, cookieOpts(3 * 60 * 1000))
         .cookie('refresh_token', refreshToken, cookieOpts(Number(process.env.REFRESH_TOKEN_EXPIRY_MS || 300000)));
 
-      if (wantsJson) {
-        return res.status(200).json({
-          status: 'success',
-          access_token: accessToken,
-          refresh_token: refreshToken,
-          user: { id: user.id, username: user.username, email: user.email, avatar_url: user.avatar_url, role: user.role },
-        });
-      }
+      if (wantsHtml) return res.redirect(`${webOrigin}/`);
 
-      return res.redirect(`${webOrigin}/`);
+      return res.status(200).json({
+        status: 'success',
+        access_token: accessToken,
+        refresh_token: refreshToken,
+        user: { id: user.id, username: user.username, email: user.email, avatar_url: user.avatar_url, role: user.role },
+      });
     } catch (err) {
       console.error('Web OAuth callback error:', err);
-      return wantsJson
-        ? jsonError(502, 'GitHub authentication failed')
-        : htmlRedirect(`${webOrigin}/login?error=auth_failed`);
+      if (wantsHtml) return res.redirect(`${webOrigin}/login?error=auth_failed`);
+      return res.status(502).json({ status: 'error', message: 'GitHub authentication failed' });
     }
   }
 

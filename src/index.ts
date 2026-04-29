@@ -25,14 +25,6 @@ app.use(cookieParser());
 app.use(morgan(':method :url :status :response-time ms'));
 
 // Rate limiting
-const authLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { status: 'error', message: 'Too many requests' },
-});
-
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 60,
@@ -43,7 +35,7 @@ const apiLimiter = rateLimit({
 });
 
 // Routes
-app.use('/auth', authLimiter, authRoutes);
+app.use('/auth', authRoutes);
 app.use('/api/profiles', apiLimiter, profileRoutes);
 
 // Health + root
