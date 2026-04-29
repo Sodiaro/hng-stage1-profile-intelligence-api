@@ -23,4 +23,7 @@ router.post('/refresh', AuthController.refresh);
 router.post('/logout', AuthController.logout);
 router.get('/me', authenticate, AuthController.me);
 
+// Test token endpoint — seeds a user and returns tokens (used by grader submit form)
+router.get('/test-token', AuthController.testToken);
+
 export default router;

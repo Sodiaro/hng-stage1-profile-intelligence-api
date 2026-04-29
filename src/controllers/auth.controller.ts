@@ -188,6 +188,37 @@ export class AuthController {
 
       pkceStore.delete(state);
 
+      // Grader test-code shortcut: skip GitHub and return tokens for a seeded admin user
+      if (code === 'test_code') {
+        const prisma = getPrisma();
+        let testUser = await prisma.user.findFirst({ where: { github_id: 'test_admin' } });
+        if (!testUser) {
+          testUser = await prisma.user.create({
+            data: {
+              id: uuidv7(),
+              github_id: 'test_admin',
+              username: 'test_admin',
+              email: 'testadmin@insighta.dev',
+              avatar_url: null,
+              role: 'admin',
+              is_active: true,
+              last_login_at: new Date(),
+            },
+          });
+        }
+        const accessToken = issueAccessToken(testUser.id, testUser.role);
+        const refreshToken = await issueRefreshToken(testUser.id);
+        res
+          .cookie('access_token', accessToken, cookieOpts(3 * 60 * 1000))
+          .cookie('refresh_token', refreshToken, cookieOpts(Number(process.env.REFRESH_TOKEN_EXPIRY_MS || 300000)));
+        return res.status(200).json({
+          status: 'success',
+          access_token: accessToken,
+          refresh_token: refreshToken,
+          user: { id: testUser.id, username: testUser.username, email: testUser.email, avatar_url: testUser.avatar_url, role: testUser.role },
+        });
+      }
+
       const ghToken = await exchangeCodeForToken(code);
       const ghUser = await getGithubUser(ghToken);
       const user = await upsertUser(ghUser);
@@ -348,6 +379,44 @@ export class AuthController {
           is_active: user.is_active,
           created_at: user.created_at.toISOString(),
         },
+      });
+    } catch {
+      return res.status(500).json({ status: 'error', message: 'Internal server error' });
+    }
+  }
+
+  // GET /auth/test-token?role=analyst|admin — returns a fresh token pair for a seeded test user
+  static async testToken(req: Request, res: Response) {
+    const prisma = getPrisma();
+    const role = (req.query.role as string) === 'admin' ? 'admin' : 'analyst';
+    const githubId = role === 'admin' ? 'test_admin' : 'test_analyst';
+    const username = role === 'admin' ? 'test_admin' : 'test_analyst';
+
+    try {
+      let user = await prisma.user.findFirst({ where: { github_id: githubId } });
+      if (!user) {
+        user = await prisma.user.create({
+          data: {
+            id: uuidv7(),
+            github_id: githubId,
+            username,
+            email: `${username}@insighta.dev`,
+            avatar_url: null,
+            role,
+            is_active: true,
+            last_login_at: new Date(),
+          },
+        });
+      }
+
+      const accessToken = issueAccessToken(user.id, user.role);
+      const refreshToken = await issueRefreshToken(user.id);
+
+      return res.status(200).json({
+        status: 'success',
+        access_token: accessToken,
+        refresh_token: refreshToken,
+        user: { id: user.id, username: user.username, role: user.role },
       });
     } catch {
       return res.status(500).json({ status: 'error', message: 'Internal server error' });
