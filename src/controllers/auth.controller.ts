@@ -109,6 +109,10 @@ async function upsertUser(ghUser: any) {
     });
   }
 
+  // First user in an empty database becomes admin
+  const userCount = await prisma.user.count();
+  const role = userCount === 0 ? 'admin' : 'analyst';
+
   return prisma.user.create({
     data: {
       id: uuidv7(),
@@ -116,7 +120,7 @@ async function upsertUser(ghUser: any) {
       username: ghUser.login,
       email: ghUser.primary_email,
       avatar_url: ghUser.avatar_url,
-      role: 'analyst',
+      role,
       is_active: true,
       last_login_at: new Date(),
     },
