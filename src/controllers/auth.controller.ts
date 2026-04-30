@@ -173,17 +173,26 @@ export class AuthController {
         return res.status(400).json({ status: 'error', message: 'Invalid or expired state' });
       }
 
-      // Verify PKCE if code_challenge was stored and code_verifier is provided
-      if (entry.code_challenge) {
-        if (!code_verifier) {
-          if (wantsHtml) return res.redirect(`${webOrigin}/login?error=pkce_required`);
-          return res.status(400).json({ status: 'error', message: 'code_verifier required' });
-        }
+      // CLI flow: state was initiated with a redirect_uri (CLI's local callback server).
+      // Forward the code+state to the CLI without processing it here.
+      // cliCallback will verify PKCE and exchange the code.
+      if (entry.redirect_uri) {
+        const dest = new URL(entry.redirect_uri);
+        dest.searchParams.set('code', code);
+        dest.searchParams.set('state', state);
+        return res.redirect(dest.toString());
+      }
+
+      // Web/grader flow: verify PKCE if code_verifier was provided
+      if (entry.code_challenge && code_verifier) {
         const expected = crypto.createHash('sha256').update(code_verifier).digest('base64url');
         if (expected !== entry.code_challenge) {
           if (wantsHtml) return res.redirect(`${webOrigin}/login?error=pkce_failed`);
           return res.status(400).json({ status: 'error', message: 'PKCE verification failed' });
         }
+      } else if (entry.code_challenge && !code_verifier) {
+        if (wantsHtml) return res.redirect(`${webOrigin}/login?error=pkce_required`);
+        return res.status(400).json({ status: 'error', message: 'code_verifier required' });
       }
 
       pkceStore.delete(state);
