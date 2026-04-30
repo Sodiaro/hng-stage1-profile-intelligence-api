@@ -6,9 +6,13 @@ import cookieParser from 'cookie-parser';
 import rateLimit from 'express-rate-limit';
 import profileRoutes from './routes/profile.routes.js';
 import authRoutes from './routes/auth.routes.js';
+import userRoutes from './routes/user.routes.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Trust reverse proxy so req.ip is the real client IP (needed for rate limiting on Leapcell)
+app.set('trust proxy', 1);
 
 app.use(cors({
   origin: (origin, callback) => callback(null, origin ?? '*'),
@@ -37,6 +41,7 @@ const apiLimiter = rateLimit({
 // Routes
 app.use('/auth', authRoutes);
 app.use('/api/profiles', apiLimiter, profileRoutes);
+app.use('/api/users', apiLimiter, userRoutes);
 
 // Health + root
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));

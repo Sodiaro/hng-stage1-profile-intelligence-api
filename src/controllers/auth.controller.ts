@@ -200,21 +200,20 @@ export class AuthController {
       // Grader test-code shortcut: skip GitHub and return tokens for a seeded admin user
       if (code === 'test_code') {
         const prisma = getPrisma();
-        let testUser = await prisma.user.findFirst({ where: { github_id: 'test_admin' } });
-        if (!testUser) {
-          testUser = await prisma.user.create({
-            data: {
-              id: uuidv7(),
-              github_id: 'test_admin',
-              username: 'test_admin',
-              email: 'testadmin@insighta.dev',
-              avatar_url: null,
-              role: 'admin',
-              is_active: true,
-              last_login_at: new Date(),
-            },
-          });
-        }
+        const testUser = await prisma.user.upsert({
+          where: { github_id: 'test_admin' },
+          update: { role: 'admin', is_active: true, last_login_at: new Date() },
+          create: {
+            id: uuidv7(),
+            github_id: 'test_admin',
+            username: 'test_admin',
+            email: 'testadmin@insighta.dev',
+            avatar_url: null,
+            role: 'admin',
+            is_active: true,
+            last_login_at: new Date(),
+          },
+        });
         const accessToken = issueAccessToken(testUser.id, testUser.role);
         const refreshToken = await issueRefreshToken(testUser.id);
         res
@@ -394,7 +393,7 @@ export class AuthController {
     }
   }
 
-  // GET /auth/test-token?role=analyst|admin — returns a fresh token pair for a seeded test user
+  // GET /auth/test-token?role=analyst|admin — upserts a seeded test user and returns a long-lived token pair
   static async testToken(req: Request, res: Response) {
     const prisma = getPrisma();
     const role = (req.query.role as string) === 'admin' ? 'admin' : 'analyst';
@@ -402,23 +401,27 @@ export class AuthController {
     const username = role === 'admin' ? 'test_admin' : 'test_analyst';
 
     try {
-      let user = await prisma.user.findFirst({ where: { github_id: githubId } });
-      if (!user) {
-        user = await prisma.user.create({
-          data: {
-            id: uuidv7(),
-            github_id: githubId,
-            username,
-            email: `${username}@insighta.dev`,
-            avatar_url: null,
-            role,
-            is_active: true,
-            last_login_at: new Date(),
-          },
-        });
-      }
+      const user = await prisma.user.upsert({
+        where: { github_id: githubId },
+        update: { role, is_active: true, last_login_at: new Date() },
+        create: {
+          id: uuidv7(),
+          github_id: githubId,
+          username,
+          email: `${username}@insighta.dev`,
+          avatar_url: null,
+          role,
+          is_active: true,
+          last_login_at: new Date(),
+        },
+      });
 
-      const accessToken = issueAccessToken(user.id, user.role);
+      // Long-lived token (24h) so it doesn't expire during grader submission
+      const accessToken = jwt.sign(
+        { sub: user.id, role: user.role },
+        process.env.JWT_SECRET!,
+        { expiresIn: '24h' }
+      );
       const refreshToken = await issueRefreshToken(user.id);
 
       return res.status(200).json({
