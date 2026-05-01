@@ -404,6 +404,7 @@ export class AuthController {
         status: 'success',
         data: {
           id: user.id,
+          github_id: user.github_id,
           username: user.username,
           email: user.email,
           avatar_url: user.avatar_url,
